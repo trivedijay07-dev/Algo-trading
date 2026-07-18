@@ -5,3 +5,5 @@ output/
 data/*.csv
 .venv/
 *.egg-info/
+data/skew_history.db
+data/nifty_5m.csv
