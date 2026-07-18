@@ -1,0 +1,115 @@
+//@version=6
+// 31 EMA High/Low Band strategy — NIFTY 50, 5m.
+// Same band as the manual chart study: EMA(31) of highs (green) / EMA(31) of lows (red).
+// Setups: band breakout/breakdown with a strong candle, pullback continuation in trend.
+// Exits: initial SL beyond signal candle + opposite band edge, band trailing SL,
+// band-flip exit, and intraday square-off.
+strategy("31 EMA Band [NIFTY 5m]", overlay = true,
+     default_qty_type = strategy.fixed, default_qty_value = 75,
+     initial_capital = 1000000, currency = currency.NONE,
+     commission_type = strategy.commission.percent, commission_value = 0.0035,
+     slippage = 1, calc_on_every_tick = false, process_orders_on_close = false)
+
+// ---------------- Inputs ----------------
+emaLen        = input.int(31,   "EMA length (band)", minval = 1)
+atrLen        = input.int(14,   "ATR length", minval = 1)
+bodyAtrMin    = input.float(0.60, "Breakout min body (ATR)", step = 0.05)
+trendBars     = input.int(12,   "Pullback: trend lookback bars", minval = 2)
+trendRatio    = input.float(0.70, "Pullback: trend ratio", step = 0.05, maxval = 1.0)
+slopeLb       = input.int(10,   "Band slope lookback", minval = 1)
+minSlopeAtr   = input.float(0.05, "Min band slope (ATR/bar)", step = 0.01)
+chopLb        = input.int(30,   "Chop lookback bars", minval = 5)
+chopMaxCross  = input.int(4,    "Chop: max band flips", minval = 1)
+slBufAtr      = input.float(0.25, "SL buffer (ATR)", step = 0.05)
+trailStartR   = input.float(1.0, "Trail activates at (R)", step = 0.25)
+sessInput     = input.session("0930-1450", "Entry window (no fresh entries outside)")
+squareOffHr   = input.int(15,   "Square-off hour", minval = 0, maxval = 23)
+squareOffMin  = input.int(20,   "Square-off minute", minval = 0, maxval = 59)
+
+// ---------------- Band & context ----------------
+emaHigh = ta.ema(high, emaLen)
+emaLow  = ta.ema(low,  emaLen)
+atrVal  = ta.atr(atrLen)
+
+plot(emaHigh, "EMA 31 High", color = color.green)
+plot(emaLow,  "EMA 31 Low",  color = color.red)
+
+state = close > emaHigh ? 1 : close < emaLow ? -1 : 0
+
+// Band midline slope, ATR-normalized
+mid      = math.avg(emaHigh, emaLow)
+slopeAtr = (mid - mid[slopeLb]) / slopeLb / atrVal
+
+// Chop filter: count full band flips (+1 <-> -1) over the lookback
+var int nzState = 0
+prevNz  = nzState
+nzState := state != 0 ? state : nzState
+flip    = nzState != prevNz and prevNz != 0
+crossCount = math.sum(flip ? 1 : 0, chopLb)
+choppy  = crossCount >= chopMaxCross
+
+// ---------------- Setups ----------------
+body      = math.abs(close - open)
+strongBar = body >= bodyAtrMin * atrVal
+
+breakoutLong  = strongBar and close > open and state == 1  and state[1] <= 0
+breakdownShort= strongBar and close < open and state == -1 and state[1] >= 0
+
+upRatio   = math.sum(state[1] == 1  ? 1 : 0, trendBars) / trendBars
+dnRatio   = math.sum(state[1] == -1 ? 1 : 0, trendBars) / trendBars
+uptrend   = upRatio >= trendRatio and slopeAtr >= minSlopeAtr
+downtrend = dnRatio >= trendRatio and slopeAtr <= -minSlopeAtr
+
+touchAbove = low <= emaHigh
+touchBelow = high >= emaLow
+pullbackLong  = uptrend   and (touchAbove or touchAbove[1]) and close > open and state == 1  and not breakoutLong
+pullbackShort = downtrend and (touchBelow or touchBelow[1]) and close < open and state == -1 and not breakdownShort
+
+inSession = not na(time(timeframe.period, sessInput))
+canEnter  = inSession and not choppy and strategy.position_size == 0
+
+longSignal  = canEnter and (breakoutLong or pullbackLong)
+shortSignal = canEnter and (breakdownShort or pullbackShort)
+
+// ---------------- Orders & risk ----------------
+var float entryStop = na
+var float riskPts   = na
+var float trailStop = na
+
+if longSignal
+    entryStop := math.min(low, emaLow) - slBufAtr * atrVal
+    riskPts   := close - entryStop
+    trailStop := na
+    strategy.entry("Long", strategy.long, comment = breakoutLong ? "Breakout" : "Pullback")
+if shortSignal
+    entryStop := math.max(high, emaHigh) + slBufAtr * atrVal
+    riskPts   := entryStop - close
+    trailStop := na
+    strategy.entry("Short", strategy.short, comment = breakdownShort ? "Breakdown" : "Pullback")
+
+// Band trailing stop after trailStartR of open profit
+if strategy.position_size > 0
+    openR = (close - strategy.position_avg_price) / math.max(riskPts, syminfo.mintick)
+    if openR >= trailStartR
+        trailStop := na(trailStop) ? emaLow : math.max(trailStop, emaLow)
+    strategy.exit("XL", "Long", stop = na(trailStop) ? entryStop : math.max(entryStop, trailStop))
+    if close < emaLow
+        strategy.close("Long", comment = "Band flip")
+if strategy.position_size < 0
+    openR = (strategy.position_avg_price - close) / math.max(riskPts, syminfo.mintick)
+    if openR >= trailStartR
+        trailStop := na(trailStop) ? emaHigh : math.min(trailStop, emaHigh)
+    strategy.exit("XS", "Short", stop = na(trailStop) ? entryStop : math.min(entryStop, trailStop))
+    if close > emaHigh
+        strategy.close("Short", comment = "Band flip")
+
+// Intraday square-off
+if hour == squareOffHr and minute >= squareOffMin and strategy.position_size != 0
+    strategy.close_all(comment = "EOD")
+
+// ---------------- Visuals ----------------
+plotshape(longSignal and breakoutLong,   "Breakout",  shape.triangleup,   location.belowbar, color.new(color.lime, 0),  size = size.small)
+plotshape(longSignal and pullbackLong,   "PullbackL", shape.triangleup,   location.belowbar, color.new(color.teal, 0),  size = size.small)
+plotshape(shortSignal and breakdownShort,"Breakdown", shape.triangledown, location.abovebar, color.new(color.red, 0),   size = size.small)
+plotshape(shortSignal and pullbackShort, "PullbackS", shape.triangledown, location.abovebar, color.new(color.orange, 0),size = size.small)
+bgcolor(choppy ? color.new(color.purple, 90) : na, title = "Choppy range")

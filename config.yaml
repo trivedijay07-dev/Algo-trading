@@ -1,0 +1,44 @@
+# ---------------------------------------------------------------
+# NIFTY 50 - 31 EMA High/Low Band strategy configuration
+# ---------------------------------------------------------------
+
+data:
+  symbol: "^NSEI"        # Yahoo Finance NIFTY 50 index
+  interval: "5m"
+  period: "60d"          # Yahoo max for 5m bars
+  timezone: "Asia/Kolkata"
+
+indicators:
+  ema_length: 31         # EMA of highs & EMA of lows (the band)
+  atr_length: 14
+
+strategy:
+  # --- entries ---
+  breakout_body_atr: 0.60      # min candle body (in ATRs) to call a break "strong"
+  pullback_trend_bars: 12      # bars of prior trend required before a pullback entry
+  pullback_trend_ratio: 0.70   # fraction of those bars that must close outside the band
+  slope_lookback: 10           # band slope measured over this many bars
+  min_slope_atr: 0.05          # band slope per bar (in ATRs) required for pullback trades
+
+  # --- chop filter ("both side choppy range" on charts) ---
+  chop_lookback: 30            # bars to inspect
+  chop_max_crossings: 4        # >= this many full band crossings => stand aside
+
+  # --- exits ---
+  sl_buffer_atr: 0.25          # buffer beyond signal-candle extreme / band edge
+  trail_activate_r: 1.0        # start trailing after this many R of open profit
+  use_band_trail: true         # trail with opposite band edge (TSL from charts)
+  target_r: 0.0                # fixed target in R (0 = disabled, ride the trail)
+
+session:
+  open: "09:15"
+  close: "15:30"
+  no_entry_first_minutes: 15   # skip opening rotation
+  no_entry_last_minutes: 30    # no fresh entries near close
+  square_off: "15:20"          # force flat
+
+backtest:
+  initial_capital: 1_000_000   # INR
+  quantity: 75                 # units per trade (1 NIFTY futures lot = 75)
+  cost_bps_per_side: 0.35      # brokerage+fees, basis points of notional
+  slippage_points: 0.75        # NIFTY points paid per fill
