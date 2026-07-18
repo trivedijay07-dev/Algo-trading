@@ -1,0 +1,69 @@
+# ---------------------------------------------------------------
+# Regime-routed GTI system — configuration
+#
+# EDGE (direction/regime) comes from options positioning (GEX/skew/VRP);
+# GTI structure is used only for entry timing and stop placement.
+# Point data.price_csv / data.regime_csv at your REAL NSE data to go live.
+# ---------------------------------------------------------------
+
+data:
+  price_csv: "data/price.csv"              # your 5m OHLCV bars (futures preferred — real volume)
+  regime_csv: "data/regime_features.csv"   # precomputed net_gex, skew_rr, iv_atm
+  # chain_csv: "data/option_chain.csv"     # OR raw chain snapshots (computed into features)
+  timezone: "Asia/Kolkata"
+  risk_free: 0.065
+
+regime:
+  gex_neg_z: -0.5          # net-GEX z below this => TREND regime (dealers short gamma)
+  gex_pos_z: 0.5           # above this => RANGE regime (dealers long gamma)
+  gex_z_lookback: 120
+  skew_z_lookback: 120
+  skew_bias_z: 0.4         # |skew z| above this gives a directional bias
+  rv_lookback: 20
+  vrp_size_floor: 0.5
+  vrp_size_cap: 1.5
+  target_daily_vol: 0.010
+
+structure:
+  golden_len: 31
+  atr_len: 14
+  break_persist_bars: 8
+  break_persist_min: 5
+  break_min_atr: 0.20
+  pullback_tag_atr: 0.15
+  pivot_lookback: 10
+  zone_width_atr: 0.40
+
+risk:
+  sl_atr: 1.1
+  trend_target_r: 0.0      # 0 => ride the trailing stop
+  range_target_r: 1.5
+  trail_activate_r: 1.0
+  trail_atr: 1.2
+  base_qty: 75
+  risk_per_trade: 0.0075   # 0.75% of equity risked per trade
+  max_trades_per_day: 6
+  max_lots: 10             # hard cap on lots per trade
+  max_leverage: 8.0        # notional <= 8x equity
+  min_risk_atr_floor: 0.6  # floor stop distance (x ATR) to avoid tiny-stop blowups
+
+session:
+  open: "09:15"
+  close: "15:30"
+  no_entry_first_minutes: 15
+  last_entry: "14:45"      # your rule: no fresh entries after 2:45pm
+  square_off: "15:15"
+
+cost:
+  brokerage_per_leg: 20.0
+  txn_pct_per_side: 0.00006   # NSE futures all-in taxes ~3 pts/lot round trip
+  slippage_points: 1.0
+
+backtest:
+  initial_capital: 1000000
+  require_regime_conviction: true   # stand aside when regime is NEUTRAL / no skew bias
+
+validation:
+  n_permutations: 500
+  walk_folds: 5
+  seed: 7
