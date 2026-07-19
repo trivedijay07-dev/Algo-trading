@@ -1,0 +1,149 @@
+//@version=6
+// =============================================================================
+// NIFTY ORB — Opening-Range Breakout (Directional, ~1:3 RR)
+// -----------------------------------------------------------------------------
+// WHY THIS DESIGN (from 2y of NIFTY 5m study, see repo FINDINGS.md):
+//   * NIFTY 5m is a near-random walk mid-day (return autocorr ~ 0). An all-day
+//     directional trigger has NO structural edge — it was proven to lose.
+//   * The ONE window with real trend persistence is the open: 09:15-09:30 shows
+//     an efficiency ratio of ~0.68 vs ~0.40 the rest of the day, and the first
+//     15-30 min move 3-4x more than mid-day.
+//   Therefore this strategy ONLY hunts the opening-range break, is flat by
+//   mid-morning if nothing triggers, and never trades the dead mid-session.
+//
+// EDGE PROFILE (what to expect, honestly):
+//   Breakout systems are LOW win-rate / HIGH reward:risk by nature. Targeting a
+//   3R exit means a ~35-45% hit rate is already profitable; 50% would be
+//   excellent. Do NOT expect a high win-rate — the money is in the few clean
+//   opening trends that run 3R while losers are cut at 1R. Validate on YOUR
+//   data (this is a hypothesis, not a promise).
+//
+// NON-REPAINTING: opening range is frozen once the OR window closes; signals
+// use confirmed bar closes; orders fill next-bar-open (process_orders_on_close
+// is off, calc_on_every_tick is off). No security()/lookahead.
+// =============================================================================
+
+strategy("NIFTY ORB Directional 1:3", shorttitle="NIFTY-ORB", overlay=true,
+     initial_capital=1000000,
+     default_qty_type=strategy.fixed, default_qty_value=75,
+     pyramiding=0, calc_on_every_tick=false, process_orders_on_close=false,
+     commission_type=strategy.commission.cash_per_order, commission_value=20,
+     slippage=2)
+
+TZ = "Asia/Kolkata"
+
+// ------------------------------- Inputs --------------------------------------
+gS = "Session windows (IST)"
+orSess    = input.session("0915-0930", "Opening-range window", group=gS,
+     tooltip="Bars in this window build the range. 0915-0930 (ER 0.68) is the sharpest.")
+entrySess = input.session("0930-1100", "Breakout entry window", group=gS,
+     tooltip="Breakouts are only taken inside this window. No fresh entries after it.")
+exitSess  = input.session("1510-1525", "Forced square-off window", group=gS,
+     tooltip="Any open position is closed here — intraday, never carry overnight.")
+
+gR = "Risk / reward"
+stopMode = input.string("ATR multiple", "Stop distance mode", group=gR,
+     options=["ATR multiple", "Range fraction", "OR opposite side"],
+     tooltip="How the 1R stop distance is set. ATR gives a stable, width-independent R.")
+atrLen   = input.int(14, "ATR length", minval=1, group=gR)
+atrMult  = input.float(1.0, "ATR multiple (1R)", minval=0.1, step=0.1, group=gR)
+rangeFrac= input.float(0.5, "Range fraction (1R)", minval=0.1, maxval=1.0, step=0.1, group=gR)
+rr       = input.float(3.0, "Reward:Risk (target = R x this)", minval=1.0, step=0.5, group=gR)
+
+gF = "Quality filters"
+minWidthATR = input.float(0.5, "Min OR width (x ATR)", minval=0.0, step=0.1, group=gF,
+     tooltip="Skip too-tight ranges (noise). ")
+maxWidthATR = input.float(4.0, "Max OR width (x ATR)", minval=0.5, step=0.1, group=gF,
+     tooltip="Skip too-wide ranges (the move already happened).")
+strongClose = input.bool(true, "Require strong close beyond level", group=gF,
+     tooltip="Breakout bar must close a buffer past the level, not just wick through.")
+bufATR      = input.float(0.1, "Close buffer (x ATR)", minval=0.0, step=0.05, group=gF)
+maxTrades   = input.int(1, "Max trades per day", minval=1, maxval=4, group=gF)
+allowLong   = input.bool(true, "Allow longs", group=gF)
+allowShort  = input.bool(true, "Allow shorts", group=gF)
+
+// ------------------------- Session membership --------------------------------
+inOR    = not na(time(timeframe.period, orSess, TZ))
+inEntry = not na(time(timeframe.period, entrySess, TZ))
+inExit  = not na(time(timeframe.period, exitSess, TZ))
+
+firstOR      = inOR and not inOR[1]      // first bar of today's OR window
+justClosedOR = not inOR and inOR[1]      // first bar after the OR window
+
+// ------------------------- Opening-range build -------------------------------
+var float orH   = na
+var float orL   = na
+var bool  orDone= false
+var int   trades= 0
+var bool  tookL = false
+var bool  tookS = false
+
+if firstOR
+    orH    := high
+    orL    := low
+    orDone := false
+    trades := 0
+    tookL  := false
+    tookS  := false
+else if inOR
+    orH := math.max(orH, high)
+    orL := math.min(orL, low)
+
+if justClosedOR
+    orDone := true
+
+atr     = ta.atr(atrLen)
+orWidth = orH - orL
+widthOK = orDone and not na(atr) and orWidth >= minWidthATR * atr and orWidth <= maxWidthATR * atr
+
+// --------------------------- Entry conditions --------------------------------
+buffer = strongClose ? bufATR * atr : 0.0
+canEnter = orDone and inEntry and widthOK and trades < maxTrades
+
+longSig  = canEnter and allowLong  and not tookL and close > orH + buffer
+shortSig = canEnter and allowShort and not tookS and close < orL - buffer
+// If both sides trigger on the same bar (rare), skip — direction is ambiguous.
+longSig  := longSig and not shortSig
+shortSig := shortSig and not longSig
+
+// ------------------------------ 1R distance ----------------------------------
+f_riskLong(entryRef) =>
+    atrR   = atrMult * atr
+    rangeR = rangeFrac * orWidth
+    oppR   = math.max(entryRef - orL, syminfo.mintick)
+    stopMode == "ATR multiple" ? atrR : stopMode == "Range fraction" ? rangeR : oppR
+f_riskShort(entryRef) =>
+    atrR   = atrMult * atr
+    rangeR = rangeFrac * orWidth
+    oppR   = math.max(orH - entryRef, syminfo.mintick)
+    stopMode == "ATR multiple" ? atrR : stopMode == "Range fraction" ? rangeR : oppR
+
+// -------------------------------- Orders -------------------------------------
+if longSig
+    risk = f_riskLong(close)
+    strategy.entry("L", strategy.long)
+    strategy.exit("L-x", from_entry="L", stop=close - risk, limit=close + rr * risk)
+    trades += 1
+    tookL  := true
+    alert("NIFTY ORB LONG break " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+if shortSig
+    risk = f_riskShort(close)
+    strategy.entry("S", strategy.short)
+    strategy.exit("S-x", from_entry="S", stop=close + risk, limit=close - rr * risk)
+    trades += 1
+    tookS  := true
+    alert("NIFTY ORB SHORT break " + str.tostring(close, format.mintick), alert.freq_once_per_bar)
+
+// Hard intraday square-off — overrides any resting stop/target.
+if inExit
+    strategy.close_all("EOD flat")
+
+// -------------------------------- Plots --------------------------------------
+plotH = orDone and not inExit
+plot(plotH ? orH : na, "OR High", color=color.new(color.teal, 0), style=plot.style_linebr, linewidth=2)
+plot(plotH ? orL : na, "OR Low",  color=color.new(color.red, 0),  style=plot.style_linebr, linewidth=2)
+bgcolor(inOR ? color.new(color.gray, 88) : na, title="OR window")
+bgcolor(inEntry ? color.new(color.blue, 93) : na, title="Entry window")
+plotshape(longSig,  "Long break",  shape.triangleup,   location.belowbar, color.teal, size=size.small)
+plotshape(shortSig, "Short break", shape.triangledown, location.abovebar, color.red,  size=size.small)
