@@ -11,6 +11,14 @@
 //   Therefore this strategy ONLY hunts the opening-range break, is flat by
 //   mid-morning if nothing triggers, and never trades the dead mid-session.
 //
+// ⚠ VALIDATION STATUS (see ORB_FINDINGS.md): backtested on 2y NIFTY 5m, this
+//   has NO standalone directional edge — permutation test z=0.28 (random entry
+//   direction does as well), and no config of 36 reached significance. Price
+//   alone can't tell it WHEN to fire. Keep it as a candidate trigger to be
+//   GATED by a proven regime/positioning signal (the veto router), not as a
+//   standalone live strategy. Its entry mechanics are sound; its timing source
+//   isn't — yet.
+//
 // EDGE PROFILE (what to expect, honestly):
 //   Breakout systems are LOW win-rate / HIGH reward:risk by nature. Targeting a
 //   3R exit means a ~35-45% hit rate is already profitable; 50% would be
