@@ -114,6 +114,21 @@ class TestFusion:
         calls = run_one(price, skew)
         assert all(c.day_type == DayType.UNSTABLE for c in calls)
 
+    def test_short_gamma_with_bias_but_no_drive_arms_trend(self):
+        # positioning evidence + skew bias is enough; the tape need not drive
+        price = make_chop_day("2026-07-16")
+        skew = make_skew("2026-07-16", net_gex=-15.0, rr_drift=0.8)
+        calls = run_one(price, skew)
+        armed = [c for c in calls if c.day_type.arms_anything]
+        assert armed and armed[0].day_type == DayType.TREND_UP
+
+    def test_short_gamma_no_direction_vetoes(self):
+        # dealers short gamma but neither bias nor drive => protect, stand aside
+        price = make_chop_day("2026-07-17")
+        skew = make_skew("2026-07-17", net_gex=-15.0, rr_drift=0.0)
+        calls = run_one(price, skew)
+        assert all(c.day_type == DayType.UNSTABLE for c in calls)
+
     def test_bias_conflict_vetoes_trend(self):
         # opening drive up + short gamma, but skew bias hard short => veto
         price = make_trend_day("2026-07-05", +1)
@@ -138,13 +153,22 @@ class TestMissingData:
         calls = run_one(price, skew)
         assert all(c.day_type == DayType.UNSTABLE for c in calls)
 
-    def test_price_only_mode_lets_momentum_speak(self):
+    def test_price_only_momentum_can_never_call_trend(self):
+        # 2y study: opening momentum has zero lift for rest-of-day trends,
+        # so without positioning data a drive must stay vetoed.
         price = make_trend_day("2026-07-08", +1)
         empty = pd.DataFrame(columns=["net_gex", "near_rr_25"])
         cfg = RouterConfig(require_positioning=False)
         calls = run_one(price, empty, cfg)
+        assert all(c.day_type == DayType.UNSTABLE for c in calls)
+
+    def test_price_only_chop_arms_mean_revert(self):
+        price = make_chop_day("2026-07-15")
+        empty = pd.DataFrame(columns=["net_gex", "near_rr_25"])
+        cfg = RouterConfig(require_positioning=False)
+        calls = run_one(price, empty, cfg)
         armed = [c for c in calls if c.day_type.arms_anything]
-        assert armed and armed[0].day_type == DayType.TREND_UP
+        assert armed and armed[0].day_type == DayType.MEAN_REVERT
 
 
 class TestVetoDynamics:
@@ -241,6 +265,42 @@ class TestCalibration:
         scored = pd.DataFrame(rows).set_index("day")
         rep = trust_report(scored)  # 50% hit rate, lb ~ 35%
         assert rep["verdict"] == "SUSPECT"
+
+    def test_protection_miss_flips_verdict_to_suspect(self):
+        # good hit rate overall, but MEAN-REVERT armed into most trend days
+        rows = []
+        for i in range(40):
+            day = pd.Timestamp("2026-01-01", tz=TZ) + pd.Timedelta(days=i)
+            if i < 8:  # killer days: armed MR into a trend day 6 of 8 times
+                realized = "TREND-UP"
+                call = "MEAN-REVERT" if i < 6 else "UNSTABLE"
+                hit = 0.0 if call == "MEAN-REVERT" else np.nan
+            else:
+                realized, call, hit = "MEAN-REVERT", "MEAN-REVERT", 1.0
+            rows.append({"day": day, "call": call, "call_ts": day,
+                         "realized": realized, "hit": hit, "reason": "t"})
+        scored = pd.DataFrame(rows).set_index("day")
+        rep = trust_report(scored)
+        assert rep["verdict"] == "SUSPECT"
+        assert rep["protection"]["exposed"] == 6
+        assert "protection" in rep["note"]
+
+    def test_good_protection_keeps_trust(self):
+        rows = []
+        for i in range(40):
+            day = pd.Timestamp("2026-01-01", tz=TZ) + pd.Timedelta(days=i)
+            if i < 6:  # killer days: 5 of 6 caught (protection 83% > 70%)
+                realized = "TREND-UP"
+                call = "UNSTABLE" if i < 5 else "MEAN-REVERT"
+                hit = np.nan if call == "UNSTABLE" else 0.0
+            else:
+                realized, call, hit = "MEAN-REVERT", "MEAN-REVERT", 1.0
+            rows.append({"day": day, "call": call, "call_ts": day,
+                         "realized": realized, "hit": hit, "reason": "t"})
+        scored = pd.DataFrame(rows).set_index("day")
+        rep = trust_report(scored)
+        assert rep["verdict"] == "TRUSTED"
+        assert rep["protection"]["caught"] == 5
 
     def test_wilson_bounds(self):
         assert wilson_lower(0, 0) == 0.0

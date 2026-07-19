@@ -21,12 +21,24 @@ different armed type or MIXED. UNSTABLE calls are never wrong — standing aside
 only costs opportunity — but they shrink *coverage*, which is reported so an
 always-UNSTABLE router can't hide behind a perfect hit rate.
 
+Straddle protection (the metric that matters most)
+--------------------------------------------------
+The 2y study showed NIFTY's default intraday state is mean-revert (~68% of
+sessions from 10:00) — the straddle-selling core edge IS the base rate. The
+router's most valuable job is therefore inverted: catch the ~5% of sessions
+that trend hard enough to hurt a short straddle. For every realized trend
+session ("killer day") we record whether the router protected (any call other
+than MEAN-REVERT — standing aside counts as protection) or exposed the
+straddle (armed MEAN-REVERT into a trend day).
+
 Trust gate
 ----------
     TRUSTED    n_armed >= min_armed_sessions  AND
-               Wilson 95% lower bound of hit rate >= trust_floor
+               Wilson 95% lower bound of hit rate >= trust_floor  AND
+               killer-day protection >= protection_floor (once enough
+               killer days have been observed to judge)
     BUILDING   sample too small to decide either way
-    SUSPECT    sample big enough and lower bound < trust_floor
+    SUSPECT    sample big enough and any gate fails
 
 With ~8 sessions of skew data today the verdict will be BUILDING — that is the
 honest answer, printed loudly, until the log reaches ~30-40 armed sessions.
@@ -51,6 +63,8 @@ class CalibrationConfig:
     min_armed_sessions: int = 30
     trust_floor: float = 0.55  # Wilson lower bound the hit rate must clear
     min_coverage: float = 0.25  # armed on at least this fraction of sessions
+    protection_floor: float = 0.70  # killer days caught / killer days seen
+    min_killer_days: int = 5  # judge protection only after this many trend days
 
 
 def wilson_lower(hits: int, n: int, z: float = 1.96) -> float:
@@ -100,7 +114,7 @@ def score_sessions(
                     "day": day,
                     "call": DayType.UNSTABLE.value,
                     "call_ts": None,
-                    "realized": realized_day_type(day_price, day_price.index[0], cfg)
+                    "realized": realized_day_type(day_price, day_calls.index[0], cfg)
                     if not day_price.empty
                     else "MIXED",
                     "hit": np.nan,  # stand-aside: not scoreable
@@ -149,15 +163,44 @@ def trust_report(scored: pd.DataFrame, cfg: CalibrationConfig | None = None) -> 
             "wilson_lb": round(wilson_lower(int(grp["hit"].sum()), len(grp)), 3),
         }
 
+    # Straddle protection: on realized trend days, anything except an armed
+    # MEAN-REVERT call counts as protection (standing aside protects too).
+    killers = scored[scored["realized"].isin([DayType.TREND_UP.value, DayType.TREND_DOWN.value])]
+    n_killers = len(killers)
+    exposed = killers[killers["call"] == DayType.MEAN_REVERT.value]
+    n_exposed = len(exposed)
+    protection = (n_killers - n_exposed) / n_killers if n_killers else float("nan")
+    protection_stats = {
+        "killer_days": n_killers,
+        "caught": n_killers - n_exposed,
+        "exposed": n_exposed,
+        "protection_rate": round(protection, 3) if n_killers else None,
+        "exposed_days": [str(d.date()) for d in exposed.index],
+    }
+    protection_judgeable = n_killers >= cfg.min_killer_days
+    protection_ok = (not protection_judgeable) or protection >= cfg.protection_floor
+
     if n_armed < cfg.min_armed_sessions:
         verdict = "BUILDING"
         note = (
             f"only {n_armed} armed sessions — need >= {cfg.min_armed_sessions} "
             f"before the veto can be trusted. Keep the skew logger running."
         )
-    elif lb >= cfg.trust_floor and coverage >= cfg.min_coverage:
+    elif lb >= cfg.trust_floor and coverage >= cfg.min_coverage and protection_ok:
         verdict = "TRUSTED"
         note = f"hit-rate lower bound {lb:.2f} clears floor {cfg.trust_floor}"
+        if not protection_judgeable:
+            note += (
+                f" (only {n_killers} killer days observed — protection unproven, "
+                f"treat trend-day risk with care)"
+            )
+    elif not protection_ok:
+        verdict = "SUSPECT"
+        note = (
+            f"straddle protection {protection:.0%} below floor "
+            f"{cfg.protection_floor:.0%}: armed MEAN-REVERT into {n_exposed} of "
+            f"{n_killers} trend days — the one failure mode that hurts most"
+        )
     elif coverage < cfg.min_coverage:
         verdict = "SUSPECT"
         note = (
@@ -180,6 +223,7 @@ def trust_report(scored: pd.DataFrame, cfg: CalibrationConfig | None = None) -> 
         "hit_rate": round(hit_rate, 3),
         "wilson_lower_95": round(lb, 3),
         "per_type": per_type,
+        "protection": protection_stats,
         "confusion": _confusion(armed),
         "note": note,
     }
@@ -211,6 +255,15 @@ def print_trust_report(rep: dict) -> None:
         for dt, row in rep.get("per_type", {}).items():
             print(f"    {dt:12s} n={row['n']:3d}  hit={row['hit_rate']:.1%}  "
                   f"lb={row['wilson_lb']:.1%}")
+        prot = rep.get("protection", {})
+        if prot:
+            rate = prot.get("protection_rate")
+            rate_s = f"{rate:.0%}" if rate is not None else "n/a (no trend days yet)"
+            print(f"  straddle protection: {prot['caught']}/{prot['killer_days']} "
+                  f"killer days caught ({rate_s})")
+            if prot.get("exposed_days"):
+                print(f"    EXPOSED (armed MEAN-REVERT into a trend day): "
+                      f"{', '.join(prot['exposed_days'])}")
         conf = rep.get("confusion", {})
         if conf:
             print("  confusion (call -> realized):")

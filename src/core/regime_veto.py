@@ -29,11 +29,25 @@ momentum (price, plus optional scanner breadth):
 
 Fusion (veto logic)
 -------------------
-    TREND-UP     positioning=trend AND momentum=up  AND bias not short
-    TREND-DOWN   positioning=trend AND momentum=down AND bias not long
+Calibrated against the 2-year study (2024-07..2026-07, 490 sessions): from
+10:00 only ~5% of days trend and 68% resolve mean-revert, and opening price
+momentum has ZERO lift for predicting a rest-of-day trend (55.7% same-sign vs
+49.8% coin flip, ~0 bps follow-through). Therefore:
+
+  * MEAN-REVERT is the workhorse call — the straddle-selling default — armed
+    when dealers are long gamma and the tape is not driving.
+  * TREND calls exist to PROTECT the straddle, and require POSITIONING
+    evidence (dealers short gamma) plus at least one directional confirmation
+    (skew bias or an opening drive) with nothing pointing the other way.
+    Price momentum alone can never produce a TREND call — the data proved it
+    cannot do that job.
+
+    TREND-UP     positioning=trend AND (bias>0 or momentum=up)
+                 AND NOT (bias<0 or momentum=down)
+    TREND-DOWN   symmetric
     MEAN-REVERT  positioning=revert AND momentum=chop/neutral
-    UNSTABLE     everything else: legs disagree, either leg missing, or the
-                 positioning feed is stale.
+    UNSTABLE     everything else: legs disagree, no directional evidence for
+                 a short-gamma day, either leg missing, or the feed is stale.
 
 `require_positioning=False` exists ONLY for calibrating the momentum leg on
 price history that predates the skew log. Live/paper trading must run with
@@ -236,25 +250,35 @@ def _fuse(pos: _LegResult, mom: _LegResult, cfg: RouterConfig) -> tuple[DayType,
 
     bias = int(pos.detail.get("bias", 0))
 
-    if pos.verdict == "trend" and mom.verdict == "up" and bias >= 0:
-        return DayType.TREND_UP, "short-gamma + opening drive up" + (
-            " + skew bias" if bias > 0 else ""
-        )
-    if pos.verdict == "trend" and mom.verdict == "down" and bias <= 0:
-        return DayType.TREND_DOWN, "short-gamma + opening drive down" + (
-            " + skew bias" if bias < 0 else ""
-        )
-    if pos.verdict == "revert" and mom.verdict in ("chop", "neutral"):
-        return DayType.MEAN_REVERT, "long-gamma pin + no opening trend"
+    if pos.verdict == "trend":
+        # Short gamma: dealers amplify moves — a straddle-killer candidate.
+        # Direction needs positive evidence (bias or drive) and no counter-evidence.
+        up_evi = bias > 0 or mom.verdict == "up"
+        dn_evi = bias < 0 or mom.verdict == "down"
+        if up_evi and not dn_evi:
+            return DayType.TREND_UP, "short-gamma + " + (
+                "skew bias up" if bias > 0 else "opening drive up"
+            )
+        if dn_evi and not up_evi:
+            return DayType.TREND_DOWN, "short-gamma + " + (
+                "skew bias down" if bias < 0 else "opening drive down"
+            )
+        return DayType.UNSTABLE, "veto: short gamma with no clear direction — protect, stand aside"
 
-    # In price-only calibration mode let the momentum leg speak alone.
+    if pos.verdict == "revert" and mom.verdict in ("chop", "neutral"):
+        return DayType.MEAN_REVERT, "long-gamma pin + no opening drive"
+
+    # Price-only calibration mode: momentum alone may only call MEAN-REVERT
+    # (small but real lift). It may NEVER call trend — the 2y study showed
+    # opening momentum has zero lift for rest-of-day trends.
     if not cfg.require_positioning and pos.verdict == "neutral":
-        if mom.verdict == "up":
-            return DayType.TREND_UP, "price-only: opening drive up"
-        if mom.verdict == "down":
-            return DayType.TREND_DOWN, "price-only: opening drive down"
         if mom.verdict == "chop":
             return DayType.MEAN_REVERT, "price-only: opening chop"
+        if mom.verdict in ("up", "down"):
+            return (
+                DayType.UNSTABLE,
+                "veto: opening drive without positioning data — momentum alone cannot call trend",
+            )
 
     return (
         DayType.UNSTABLE,
